@@ -25,9 +25,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
-import org.springframework.context.annotation.Bean;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-import org.springframework.web.servlet.config.annotation.CorsRegistry;
 
 
 @RestController
@@ -63,38 +60,61 @@ public class ResourceController {
     }
     
     // Endpoint for frontend to start the login process.
+   
     @PostMapping("/login/start")
     public ResponseEntity<?> startLogin(@RequestBody Loginrequest loginRequest) {
         if (loginRequest == null || loginRequest.getTenantId() == null || loginRequest.getSubscriptionId() == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "Tenant ID and Subscription ID are required."));
         }
-
+    
         String loginId = UUID.randomUUID().toString();
-        final AtomicReference<DeviceCodeResponse> challengeHolder = new AtomicReference<>();
-
+        
+        // This AtomicReference is perfectly fine to use.
+        final AtomicReference<DeviceCodeResponse> deviceCodeResponse = new AtomicReference<>();
+    
         try {
+            // Build the credential. The key is that the challengeConsumer block
+            // IS EXECUTED SYNCHRONOUSLY as part of the .build() process.
             DeviceCodeCredential credential = new DeviceCodeCredentialBuilder()
-                .tenantId(loginRequest.getTenantId())
-                .clientId(AZURE_CLI_CLIENT_ID)
-                .challengeConsumer(challenge -> {
-                    DeviceCodeResponse response = new DeviceCodeResponse(
-                        challenge.getUserCode(),
-                        challenge.getVerificationUrl(),
-                        challenge.getMessage());
-                    challengeHolder.set(response);
-                })
-                .build();
-
-            // Store the credential, waiting for the user to authenticate.
+                    .tenantId(loginRequest.getTenantId())
+                    .clientId(AZURE_CLI_CLIENT_ID)
+                    .challengeConsumer(challenge -> {
+                        // This block is guaranteed to run BEFORE the .build() method returns.
+                        // This is where we populate our response object.
+                        System.out.println("Challenge received from Azure. User code: " + challenge.getUserCode());
+                        deviceCodeResponse.set(new DeviceCodeResponse(
+                                challenge.getUserCode(),
+                                challenge.getVerificationUrl(),
+                                challenge.getMessage()
+                        ));
+                    })
+                    .build();
+            
+            // --- THIS IS THE CRITICAL FIX ---
+            // Check if the consumer was actually called. If not, it means the SDK
+            // failed to get the challenge from Microsoft for some reason (e.g., network issue,
+            // invalid tenant ID) before it could even generate a code.
+            if (deviceCodeResponse.get() == null) {
+                System.err.println("CRITICAL ERROR: DeviceCodeCredentialBuilder completed but the challenge consumer was not called.");
+                throw new IllegalStateException("Failed to get a device code challenge from Azure. Please check tenant ID and network connectivity.");
+            }
+    
+            // Now that we have the credential object and we know the DTO is populated,
+            // we can store the credential for the polling step.
             PENDING_LOGINS_MAP.put(loginId, new PendingLogin(credential));
-
-            // Return the necessary info to the frontend.
+    
+            // It is now safe to return the response because we have confirmed
+            // that deviceCodeResponse.get() is not null.
             return ResponseEntity.ok(Map.of(
-                "loginId", loginId,
-                "deviceCodeInfo", challengeHolder.get()
+                    "loginId", loginId,
+                    "deviceCodeInfo", deviceCodeResponse.get()
             ));
+    
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", "Authentication failed to start: " + e.getMessage()));
+            // This will now catch the IllegalStateException from above, or any other
+            // error from the Azure SDK itself (like MsalServiceException).
+            e.printStackTrace();
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to start authentication. " + e.getMessage()));
         }
     }
 
