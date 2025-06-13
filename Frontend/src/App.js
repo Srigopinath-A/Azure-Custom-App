@@ -3,18 +3,13 @@ import { AuthProvider, useAuth } from './services/AuthContent';
 import LoginPage from './components/LoginPage';
 import Dashboard from './components/Dashboard';
 
-// A small component to handle the loading and routing logic
+// This router is now much simpler.
 const AppRouter = () => {
-  const { isAuthenticated, isLoading } = useAuth();
+  // It only cares about one thing: is the user authenticated?
+  const { isAuthenticated } = useAuth();
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-gray-900 text-white">
-        <p>Loading session...</p>
-      </div>
-    );
-  }
-
+  // If authenticated, show Dashboard. If not, show LoginPage.
+  // The concept of a global "loading..." screen is gone.
   return isAuthenticated ? <Dashboard /> : <LoginPage />;
 };
 

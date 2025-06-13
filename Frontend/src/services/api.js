@@ -1,29 +1,29 @@
 import axios from 'axios';
 
-// Create an Axios instance with base configuration
 const apiClient = axios.create({
-  baseURL: 'http://127.0.0.1:8080/api', // Your Spring Boot backend URL
-  withCredentials: true, // IMPORTANT: This sends cookies for session management
-});
-
-// --- Authentication Flow ---
-
-export const startLogin = (tenantId, subscriptionId) => {
-  return apiClient.post('/login/start', { tenantId, subscriptionId });
-};
-
-export const checkLoginStatus = (loginId, tenantId, subscriptionId) => {
-  return apiClient.post(`/login/check/${loginId}`, { tenantId, subscriptionId });
-};
-
-export const checkSession = () => {
-  return apiClient.get('/check-session');
-};
-
-export const logout = () => {
-  return apiClient.post('/logout');
-};
-
+    baseURL: 'http://localhost:8080/api', // Use localhost for consistency
+    withCredentials: true,
+  });
+  
+  // --- Authentication Flow ---
+  
+  // SENDING JSON - This is the standard and best way.
+  export const startLogin = (tenantId, subscriptionId) => {
+    return apiClient.post('/login/start', { tenantId, subscriptionId });
+  };
+  
+  // SENDING JSON
+  export const checkLoginStatus = (loginId, tenantId, subscriptionId) => {
+    return apiClient.post(`/login/check/${loginId}`, { tenantId, subscriptionId });
+  };
+  
+  export const checkSession = () => {
+    return apiClient.get('/check-session');
+  };
+  
+  export const logout = () => {
+    return apiClient.post('/logout');
+  };
 // --- Resource Management ---
 
 export const fetchResources = () => {

@@ -5,10 +5,10 @@ const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true); // Start as true to check session
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // On initial app load, check if a session already exists
+    // Check for an existing session ONLY ONCE on startup.
     const verifySession = async () => {
       try {
         await checkSession();
@@ -22,21 +22,15 @@ export const AuthProvider = ({ children }) => {
     verifySession();
   }, []);
 
-  const login = () => {
-    setIsAuthenticated(true);
-  };
+  const login = () => setIsAuthenticated(true);
 
   const logout = async () => {
-    await apiLogout();
     setIsAuthenticated(false);
+    try { await apiLogout(); } catch (e) { /* ignore */ }
   };
 
   const value = { isAuthenticated, isLoading, login, logout };
-
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-// Custom hook to easily use the auth context
-export const useAuth = () => {
-  return useContext(AuthContext);
-};
+export const useAuth = () => useContext(AuthContext);

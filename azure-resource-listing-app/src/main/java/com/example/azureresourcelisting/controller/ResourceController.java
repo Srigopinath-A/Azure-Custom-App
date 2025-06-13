@@ -1,5 +1,7 @@
 package com.example.azureresourcelisting.controller;
 
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
 import com.azure.core.management.AzureEnvironment;
 import com.azure.core.management.profile.AzureProfile;
 import com.azure.identity.DeviceCodeCredential;
@@ -9,6 +11,10 @@ import com.example.azureresourcelisting.model.DeviceCodeResponse;
 import com.example.azureresourcelisting.model.Loginrequest;
 import com.example.azureresourcelisting.model.UpdateTagsRequest;
 import com.example.azureresourcelisting.service.AzureResourceService;
+import com.microsoft.aad.msal4j.MsalServiceException;
+
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.core.http.HttpClient;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -33,12 +39,9 @@ import java.util.concurrent.atomic.AtomicReference;
 public class ResourceController {
 
     private final AzureResourceService azureResourceService;
-
-    // In-memory storage for pending login attempts.
     private static final Map<String, PendingLogin> PENDING_LOGINS_MAP = new ConcurrentHashMap<>();
     private static final String AZURE_CLI_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46";
 
-    // Inner class to hold the credential and timestamp for a pending login.
     static class PendingLogin {
         final DeviceCodeCredential credential;
         final long createdAt;
@@ -53,91 +56,82 @@ public class ResourceController {
         this.azureResourceService = azureResourceService;
     }
 
-    // Helper to safely get the Azure client from the user's session.
     private AzureResourceManager getAzureFromSession(HttpServletRequest request) {
-        HttpSession session = request.getSession(false); // false = don't create a new session if one doesn't exist
+        HttpSession session = request.getSession(false);
         return (session != null) ? (AzureResourceManager) session.getAttribute("AZURE_SESSION") : null;
     }
-    
-    // Endpoint for frontend to start the login process.
-   
+
     @PostMapping("/login/start")
     public ResponseEntity<?> startLogin(@RequestBody Loginrequest loginRequest) {
-        if (loginRequest == null || loginRequest.getTenantId() == null || loginRequest.getSubscriptionId() == null) {
+        if (loginRequest.getTenantId() == null || loginRequest.getSubscriptionId() == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "Tenant ID and Subscription ID are required."));
         }
-    
+
         String loginId = UUID.randomUUID().toString();
-        
-        // This AtomicReference is perfectly fine to use.
         final AtomicReference<DeviceCodeResponse> deviceCodeResponse = new AtomicReference<>();
-    
+
         try {
-            // Build the credential. The key is that the challengeConsumer block
-            // IS EXECUTED SYNCHRONOUSLY as part of the .build() process.
+            // Explicitly create the Netty HTTP client for stability
+            HttpClient nettyHttpClient = new NettyAsyncHttpClientBuilder().build();
+
             DeviceCodeCredential credential = new DeviceCodeCredentialBuilder()
-                    .tenantId(loginRequest.getTenantId())
-                    .clientId(AZURE_CLI_CLIENT_ID)
-                    .challengeConsumer(challenge -> {
-                        // This block is guaranteed to run BEFORE the .build() method returns.
-                        // This is where we populate our response object.
-                        System.out.println("Challenge received from Azure. User code: " + challenge.getUserCode());
-                        deviceCodeResponse.set(new DeviceCodeResponse(
-                                challenge.getUserCode(),
-                                challenge.getVerificationUrl(),
-                                challenge.getMessage()
-                        ));
-                    })
-                    .build();
+                .httpClient(nettyHttpClient)
+                .tenantId(loginRequest.getTenantId())
+                .clientId(AZURE_CLI_CLIENT_ID)
+                .challengeConsumer(challenge -> {
+                    // This block MUST be called by the SDK before .build() returns.
+                    // This is where we capture the user code and URL.
+                    System.out.println(">>> LOGIN CHALLENGE RECEIVED FROM AZURE: " + challenge.getMessage());
+                    deviceCodeResponse.set(new DeviceCodeResponse(
+                            challenge.getUserCode(),
+                            challenge.getVerificationUrl(),
+                            challenge.getMessage()
+                    ));
+                })
+                .build();
             
-            // --- THIS IS THE CRITICAL FIX ---
-            // Check if the consumer was actually called. If not, it means the SDK
-            // failed to get the challenge from Microsoft for some reason (e.g., network issue,
-            // invalid tenant ID) before it could even generate a code.
+            // This is our crucial safety check.
             if (deviceCodeResponse.get() == null) {
-                System.err.println("CRITICAL ERROR: DeviceCodeCredentialBuilder completed but the challenge consumer was not called.");
-                throw new IllegalStateException("Failed to get a device code challenge from Azure. Please check tenant ID and network connectivity.");
+                throw new IllegalStateException("The Azure SDK failed to get a device code. This is likely a proxy or a Tenant ID issue.");
             }
-    
-            // Now that we have the credential object and we know the DTO is populated,
-            // we can store the credential for the polling step.
+
+            // We have the credential, store it for the polling step.
             PENDING_LOGINS_MAP.put(loginId, new PendingLogin(credential));
-    
-            // It is now safe to return the response because we have confirmed
-            // that deviceCodeResponse.get() is not null.
+
+            // Return the loginId and the device code info immediately.
             return ResponseEntity.ok(Map.of(
                     "loginId", loginId,
                     "deviceCodeInfo", deviceCodeResponse.get()
             ));
-    
+
+        } catch (MsalServiceException msalEx) {
+            System.err.println("MSAL Service Exception: " + msalEx.getMessage());
+            return ResponseEntity.status(msalEx.statusCode()).body(Map.of("error", "Azure Authentication Error: " + msalEx.getMessage()));
         } catch (Exception e) {
-            // This will now catch the IllegalStateException from above, or any other
-            // error from the Azure SDK itself (like MsalServiceException).
             e.printStackTrace();
-            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to start authentication. " + e.getMessage()));
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
     }
 
-    // Endpoint for the frontend to poll to see if the user has completed the login.
     @PostMapping("/login/check/{loginId}")
-    public ResponseEntity<?> checkLogin(@PathVariable String loginId, @RequestBody Loginrequest loginRequest, HttpServletRequest servletRequest) {
+    public ResponseEntity<?> checkLogin(@RequestBody Loginrequest loginRequest, @PathVariable String loginId, HttpServletRequest servletRequest) {
         PendingLogin pendingLogin = PENDING_LOGINS_MAP.get(loginId);
         if (pendingLogin == null) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Login session expired or not found. Please start over."));
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Login session expired."));
         }
+
         try {
-            // This is the magic. We try to use the credential. It will only work if the user has signed in.
             AzureProfile profile = new AzureProfile(loginRequest.getTenantId(), loginRequest.getSubscriptionId(), AzureEnvironment.AZURE);
+            // This is the blocking call that will only succeed after the user signs in.
             AzureResourceManager azure = AzureResourceManager.authenticate(pendingLogin.credential, profile).withDefaultSubscription();
 
-            // SUCCESS! Store the authenticated client in the user's HTTP session.
+            // SUCCESS!
             servletRequest.getSession(true).setAttribute("AZURE_SESSION", azure);
-            PENDING_LOGINS_MAP.remove(loginId); // Clean up
-
+            PENDING_LOGINS_MAP.remove(loginId);
             return ResponseEntity.ok(Map.of("message", "Authentication successful!"));
+
         } catch (Exception e) {
-            // This is the EXPECTED case when the user hasn't finished logging in yet.
-            // Tell the frontend to keep polling.
+            // Any exception means the user has not finished logging in yet.
             return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("status", "PENDING"));
         }
     }
