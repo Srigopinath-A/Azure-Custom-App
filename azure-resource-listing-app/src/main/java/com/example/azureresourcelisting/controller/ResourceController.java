@@ -89,8 +89,6 @@ public class ResourceController {
                     ));
                 })
                 .build();
-            
-            // This is our crucial safety check.
             if (deviceCodeResponse.get() == null) {
                 throw new IllegalStateException("The Azure SDK failed to get a device code. This is likely a proxy or a Tenant ID issue.");
             }
